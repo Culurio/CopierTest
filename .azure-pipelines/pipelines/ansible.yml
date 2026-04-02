@@ -1,0 +1,145 @@
+trigger:
+  branches:
+    exclude:
+      - "*"
+
+variables:
+  - group: vg-CopierTest
+
+resources:
+  repositories:
+    - repository: templates # alias you choose
+      type: git
+      name: pipeline-templates
+      # Pin to a tag/branch for reproducibility, e.g. refs/tags/v1.2.3
+      ref: refs/tags/latest
+
+parameters:
+  # List of Ansible targets (playbook/inventory/vars) to run
+  - name: environments
+    displayName: Target environment (maps to tfvars)
+    type: object
+    default:
+
+      - name: dev
+        slotVariable: ""
+
+
+      - name: qa
+        slotVariable: ""
+
+
+      - name: prod
+        slotVariable: ""
+
+      - name: dr-prod
+        slotVariable: DR_SLOT_PROD
+
+
+  - name: targets
+    type: object
+    default:
+      - name: update_dns_a_records
+        playbook: ansible/playbooks/update_dns_a_records.yml
+        inventory: ansible/inventory/hosts.yml
+        varsFile: ansible/vars/dns_a_records.yml
+        extraArgs: "--limit ad-machine"
+        requirementsFile: ansible/requirements.yml
+  - name: serviceConnection
+    displayName: Azure service connection
+    type: string
+    default: infrastructure-service-connection
+    values: ["infrastructure-service-connection"]
+
+pool: $[coalesce(variables.VG_DEFAULT_RUNNER, 'Azure Pipelines')]
+
+stages:
+  # -------------------------------------------------------------------
+  # 0) Fetch secrets from Key Vault (runs before all ansible stages)
+  # -------------------------------------------------------------------
+  - stage: Fetch_Secrets
+    displayName: "Fetch Ansible Credentials"
+    jobs:
+      - job: fetch_credentials
+        displayName: "Fetch from Key Vault"
+        steps:
+          - task: AzureCLI@2
+            name: keyvault_secrets
+            displayName: "Fetch DNS Ansible credentials from Key Vault"
+            inputs:
+              azureSubscription: ${{ parameters.serviceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+
+                echo "Fetching DNS Ansible secrets from Key Vault..."
+
+                DNS_ANSIBLE_USERNAME=$(az keyvault secret show \
+                  --vault-name kv-dns-dr-prod-wus-01 \
+                  --name dns-ansible-username \
+                  --query value -o tsv)
+
+                DNS_ANSIBLE_PASSWORD=$(az keyvault secret show \
+                  --vault-name kv-dns-dr-prod-wus-01 \
+                  --name dns-ansible-password \
+                  --query value -o tsv)
+
+                # Output variables for use in subsequent stages
+                echo "##vso[task.setvariable variable=DNS_ANSIBLE_USERNAME;isoutput=true;issecret=true]$DNS_ANSIBLE_USERNAME"
+                echo "##vso[task.setvariable variable=DNS_ANSIBLE_PASSWORD;isoutput=true;issecret=true]$DNS_ANSIBLE_PASSWORD"
+
+  # PR pipeline: lint + syntax + check only (no apply)
+  - ${{ if eq(variables['Build.Reason'], 'PullRequest') }}:
+      - ${{ each target in parameters.targets }}:
+          - template: templates/v1/stages/ansible-deploy.yml@templates
+            parameters:
+              playbook: ${{ target.playbook }}
+              inventory: ${{ target.inventory }}
+              varsFile: ${{ target.varsFile }}
+              extraArgs: ${{ target.extraArgs }}
+              requirementsFile: ${{ target.requirementsFile }}
+              enableCheckStage: true
+              enableApplyStage: false
+              lintStageName: ${{ format('PR_Ansible_Lint_{0}', replace(target.name, '-', '_')) }}
+              checkStageName: ${{ format('PR_Ansible_Check_{0}', replace(target.name, '-', '_')) }}
+              applyStageName: ${{ format('PR_Ansible_Apply_{0}', replace(target.name, '-', '_')) }}
+              lintDisplayName: "${{ format('PR: Ansible lint & syntax ({0})', target.name) }}"
+              checkDisplayName: "${{ format('PR: Ansible dry-run (--check) ({0})', target.name) }}"
+              applyDisplayName: "${{ format('PR: Apply (disabled) ({0})', target.name) }}"
+              dependsOnStages:
+                - Fetch_Secrets
+              envVars:
+                - name: DNS_ANSIBLE_USERNAME
+                  value: $[stageDependencies.Fetch_Secrets.fetch_credentials.outputs['keyvault_secrets.DNS_ANSIBLE_USERNAME']]
+                - name: DNS_ANSIBLE_PASSWORD
+                  value: $[stageDependencies.Fetch_Secrets.fetch_credentials.outputs['keyvault_secrets.DNS_ANSIBLE_PASSWORD']]
+
+  # Main pipeline: lint + syntax + check + apply
+  - ${{ if ne(variables['Build.Reason'], 'PullRequest') }}:
+      - ${{ each target in parameters.targets }}:
+          - template: templates/v1/stages/ansible-deploy.yml@templates
+            parameters:
+              playbook: ${{ target.playbook }}
+              inventory: ${{ target.inventory }}
+              varsFile: ${{ target.varsFile }}
+              extraArgs: ${{ target.extraArgs }}
+              requirementsFile: ${{ target.requirementsFile }}
+              stageCondition: ne(variables['Build.Reason'], 'PullRequest') # allow apply on non-PR branches for testing
+              enableCheckStage: true
+              enableApplyStage: true
+              applyCondition: succeeded() # testing: run apply on this branch
+              lintStageName: ${{ format('Main_Ansible_Lint_{0}', replace(target.name, '-', '_')) }}
+              checkStageName: ${{ format('Main_Ansible_Check_{0}', replace(target.name, '-', '_')) }}
+              applyStageName: ${{ format('Main_Ansible_Apply_{0}', replace(target.name, '-', '_')) }}
+              lintDisplayName: "${{ format('Main: Ansible lint & syntax ({0})', target.name) }}"
+              checkDisplayName: "${{ format('Main: Ansible dry-run (--check) ({0})', target.name) }}"
+              applyDisplayName: "${{ format('Main: Apply ({0})', target.name) }}"
+              dependsOnStages:
+                - Fetch_Secrets
+              envVars:
+                - name: DNS_ANSIBLE_USERNAME
+                  value: $[stageDependencies.Fetch_Secrets.fetch_credentials.outputs['keyvault_secrets.DNS_ANSIBLE_USERNAME']]
+                - name: DNS_ANSIBLE_PASSWORD
+                  value: $[stageDependencies.Fetch_Secrets.fetch_credentials.outputs['keyvault_secrets.DNS_ANSIBLE_PASSWORD']]

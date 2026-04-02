@@ -1,0 +1,10 @@
+repository_name: example-infra
+service_connection: example-azure-service-connection
+pipeline_templates_ref: refs/tags/v1.2.3
+environments:
+  - name: dev
+    has_dr: false
+  - name: qa
+    has_dr: false
+  - name: prod
+    has_dr: true

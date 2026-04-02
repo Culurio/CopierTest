@@ -1,0 +1,15 @@
+repository_name: example-infra
+service_connection: infrastructure-service-connection
+resource_group_name: rg-devops-dr-prod-westus-01
+storage_account_name: stdevopsdrprodwestus01
+backend_subscription_id: 078a9949-64e1-486b-911b-2ccd2876ecb1
+pipeline_templates_ref: refs/tags/latest
+container_name: example-infra
+key: example-infra
+environments:
+  - name: dev
+    has_dr: false
+  - name: qa
+    has_dr: false
+  - name: prod
+    has_dr: true
